@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { Client, Collection, Intents } = require('discord.js');
+const { Client, Collection, Intents, MessageEmbed } = require('discord.js');
 const { token } = require('./config.json');
 // const { MessageActionRow, MessageButton } = require('discord.js');
 // const wait = require('util').promisify(setTimeout);
@@ -9,14 +9,18 @@ const client = new Client({
 });
 const queue = new Map();
 const ytdl = require("ytdl-core");
-const { createAudioPlayer, NoSubscriberBehavior } = require('@discordjs/voice');
+const { createAudioPlayer, NoSubscriberBehavior, AudioPlayerStatus, state } = require('@discordjs/voice');
 const { joinVoiceChannel } = require('@discordjs/voice');
 const player = createAudioPlayer({
 	behaviors: {
 		noSubscriber: NoSubscriberBehavior.Pause,
 	},
 });
-const { createAudioResource, StreamType } = require('@discordjs/voice');
+
+const { createAudioResource } = require('@discordjs/voice');
+
+let musicMsg = new MessageEmbed()
+	.setTitle('None');
 
 client.commands = new Collection();
 const commandFiles = fs.readdirSync('./commands').filter(file => file.endsWith('.js'));
@@ -46,9 +50,6 @@ client.on('interactionCreate', async interaction => {
 		await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
 	}
 });
-
-// add the trackStart event so when a song will be played this message will be sent
-// player.on("trackStart", (queue, track) => queue.metadata.channel.send(`🎶 | Now playing **${track.title}**!`))
 
 client.on('message', msg => {
 	// if (msg.author.id === '351059345817206784') {
@@ -97,16 +98,27 @@ client.on('message', async message => {
 
 	const serverQueue = queue.get(message.guild.id);
 
-	if (message.content.startsWith(`${prefix}play`)) {
+	if (message.content.startsWith(`${prefix}stop`)
+		|| message.content.startsWith(`${prefix}pause`)) {
+		stop(message);
+		return;
+	}
+	else if (message.content.startsWith(`${prefix}play`)
+		|| message.content.startsWith(`${prefix}p`)) {
 		execute(message, serverQueue);
 		return;
 	}
 	else if (message.content.startsWith(`${prefix}skip`)) {
-		skip(message, serverQueue);
+		skip(message);
 		return;
 	}
-	else if (message.content.startsWith(`${prefix}stop`)) {
-		stop(message, serverQueue);
+	else if (message.content.startsWith(`${prefix}continue`)
+		|| message.content.startsWith(`${prefix}unpause`)) {
+		unpause(message);
+		return;
+	}
+	else if (message.content.startsWith(`${prefix}np`)) {
+		nowPlaying(message);
 		return;
 	}
 });
@@ -114,24 +126,32 @@ client.on('message', async message => {
 async function execute(message, serverQueue) {
 	const args = message.content.split(' ');
 
+	if (!args[1]) {
+		unpause(message);
+		return;
+	}
 	const voiceChannel = message.member.voice.channel;
 	if (!voiceChannel) {
-		return message.channel.send('You need to be in a voice channel to play music!');
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**You need to be in a voice channel to play music!**');
+		return message.channel.send({ embeds: [msg] });
 	}
 	const permissions = voiceChannel.permissionsFor(message.client.user);
 	if (!permissions.has('CONNECT') || !permissions.has('SPEAK')) {
-		return message.channel.send('I need the permissions to join and speak in your voice channel!');
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**I need the permissions to join and speak in your voice channel!**');
+		return message.channel.send({ embeds: [msg] });
 	}
 
 	const songInfo = await ytdl.getInfo(args[1]);
 	const song = {
 		title: songInfo.videoDetails.title,
 		url: songInfo.videoDetails.video_url,
+		thumbnail: songInfo.videoDetails.thumbnails
 	};
-	// console.log(song.url);
-	const { join } = require('path');
-	ytdl(song.url, { filter: 'audioonly' }).pipe(fs.createWriteStream('video.mp3'));
-	const resource = createAudioResource(join(__dirname,'video.mp3'));
+
 	if (!serverQueue) {
 		const queueContruct = {
 			textChannel: message.channel,
@@ -141,71 +161,156 @@ async function execute(message, serverQueue) {
 			volume: 5,
 			playing: true,
 		};
-
-		queue.set(message.guild.id, queueContruct);
-
 		queueContruct.songs.push(song);
-
-		try {
-			const connection = joinVoiceChannel({
-				channelId: message.member.voice.channel.id,
-				guildId: message.member.voice.channel.guild.id,
-				adapterCreator: message.member.voice.channel.guild.voiceAdapterCreator,
-			});
-			connection.subscribe(player);
-			player.play(resource);
-		}
-		catch (err) {
-			console.log(err);
-			queue.delete(message.guild.id);
-			return message.channel.send(err);
-		}
+		queue.set(message.guild.id, queueContruct);
+		play(message);
 	}
 	else {
 		serverQueue.songs.push(song);
-		return message.channel.send(`${song.title} has been added to the queue!`);
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle(`**${song.title} has been added to the queue!**`);
+		return message.channel.send({ embeds: [msg] });
 	}
 }
 
-function skip(message, serverQueue) {
+function nowPlaying(message) {
 	if (!message.member.voice.channel) {
-		return message.channel.send('You have to be in a voice channel to stop the music!');
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**You have to be in the voice channel to use this command!**');
+		return message.channel.send({ embeds: [msg] });
 	}
-	if (!serverQueue) {
-		return message.channel.send('There is no song that I could skip!');
+
+	if (player.state.status === 'idle') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**Nothing is currently playing!**');
+		return message.channel.send({ embeds: [msg] });
 	}
-	serverQueue.connection.dispatcher.end();
+	else {
+		musicMsg.setTitle('**Current Song**');
+		return message.channel.send({ embeds: [musicMsg] });
+	}
 }
 
-function stop(message, serverQueue) {
+function skip(message) {
 	if (!message.member.voice.channel) {
-		return message.channel.send('You have to be in a voice channel to stop the music!');
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**You have to be in the voice channel to skip the music!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+	if (player.state.status === 'idle') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The queue is empty!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+	else {
+		player.stop();
+		play(message);
 	}
 
-	if (!serverQueue) {
-		return message.channel.send('There is no song that I could stop!');
-	}
-	serverQueue.songs = [];
-	serverQueue.connection.dispatcher.end();
 }
 
-function play(guild, song) {
-	const serverQueue = queue.get(guild.id);
-	if (!song) {
-		serverQueue.voiceChannel.leave();
-		queue.delete(guild.id);
+function unpause(message) {
+	if (!message.member.voice.channel) {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**You have to be in the voice channel to unpause the music!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+
+	if (player.state.status === 'idle') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The queue is empty!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+	else if (player.state.status === 'paused') {
+		player.unpause();
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The track will now continue!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+
+	else if (player.state.status === 'playing') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The track is already playing!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+}
+
+function stop(message) {
+	if (!message.member.voice.channel) {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**You have to be in the voice channel to stop the music!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+
+	if (player.state.status === 'idle') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The queue is empty!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+
+	else if (player.state.status === 'paused') {
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**The track is already paused!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+
+	else if (player.state.status === 'playing') {
+		player.pause();
+		const msg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**Paused!**');
+		return message.channel.send({ embeds: [msg] });
+	}
+}
+
+function play(message) {
+	const serverQueue = queue.get(message.guild.id);
+	console.log("running play")
+	if (!serverQueue) {
+		return;
+	}
+	const song = serverQueue.songs.shift();
+	if (song) {
+		const stream = ytdl(song.url, { filter: 'audioonly' })
+		const resource = createAudioResource(stream)
+
+		const connection = joinVoiceChannel({
+			channelId: message.member.voice.channel.id,
+			guildId: message.member.voice.channel.guild.id,
+			adapterCreator: message.member.voice.channel.guild.voiceAdapterCreator,
+		});
+		connection.subscribe(player);
+		player.play(resource);
+		musicMsg = new MessageEmbed()
+			.setColor('#e75480')
+			.setTitle('**Now Playing**')
+			.setDescription(`[${song.title}](${song.url})`)
+			.setThumbnail(`${song.thumbnail[3].url}`)
+			.setTimestamp()
+			.setFooter({ text: `Added by ${message.author.username}`, iconURL: `${message.author.avatarURL()}` });
+		message.channel.send({ embeds: [musicMsg] });
+
+		player.on(AudioPlayerStatus.Idle, () => {
+			play(message);
+		})
+	}
+	else {
+		queue.delete(message.guild.id);
 		return;
 	}
 
-	const dispatcher = serverQueue.connection
-		.play(ytdl(song.url))
-		.on('finish', () => {
-			serverQueue.songs.shift();
-			play(guild, serverQueue.songs[0]);
-		})
-		.on('error', error => console.error(error));
-	dispatcher.setVolumeLogarithmic(serverQueue.volume / 5);
-	serverQueue.textChannel.send(`Start playing: **${song.title}**`);
 }
-
+//TODO: loop, loop queue, queue? 
 client.login(token);
